@@ -1,0 +1,8 @@
+{
+    "display_name": "MiMo TTS",
+    "plugin_id": "kira-ai-plugin-mimo-tts",
+    "version": "1.4.0",
+    "author": "xxynet+znq19",
+    "description": "使用小米 MiMo v2.5 VoiceDesign 进行语音合成，支持自定义音色描述",
+    "repo": "https://github.com/znq19/kira-ai-plugin-mimo-tts"
+}

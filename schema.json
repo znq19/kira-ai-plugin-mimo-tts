@@ -1,0 +1,38 @@
+{
+    "api_key": {
+        "name": "MiMo API Key",
+        "type": "sensitive",
+        "default": null,
+        "hint": "Your MiMo API key from https://platform.xiaomimimo.com",
+        "locales": {
+            "zh": {
+                "name": "MiMo API 密钥",
+                "hint": "在 https://platform.xiaomimimo.com 获取的 API 密钥"
+            }
+        }
+    },
+    "default_voice": {
+        "name": "Default Voice Description",
+        "type": "textarea",
+        "default": "一个年轻温柔的女性声音，语速适中，语调自然亲切",
+        "hint": "Default voice description used when none is specified. Describe gender, age, tone, pace, etc.",
+        "locales": {
+            "zh": {
+                "name": "默认音色描述",
+                "hint": "未指定音色时使用的默认描述。描述性别、年龄、音色、语速等特征"
+            }
+        }
+    },
+    "auto_format_fix": {
+        "name": "Auto Voice Message Format Fix",
+        "type": "switch",
+        "default": true,
+        "hint": "Before sending, automatically split voice messages into standalone clean messages (without @/reply) so they display correctly on QQ. Also applies to the official <record> tag.",
+        "locales": {
+            "zh": {
+                "name": "语音消息格式自动修复",
+                "hint": "发送前自动把语音拆分为单条干净的消息（不带 @ 和回复），防止 QQ 上语音无法显示。对官方 <record> 标签的语音同样生效"
+            }
+        }
+    }
+}
