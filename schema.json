@@ -34,5 +34,53 @@
                 "hint": "发送前自动把语音拆分为单条干净的消息（不带 @ 和回复），防止 QQ 上语音无法显示。对官方 <record> 标签的语音同样生效"
             }
         }
+    },
+    "save_audio": {
+        "name": "Save Audio Files",
+        "type": "switch",
+        "default": false,
+        "hint": "Save synthesized audio under data/files/mimo_tts (kept with quota + periodic cleanup) instead of pure base64 direct send. The log prints the full path.",
+        "locales": {
+            "zh": {
+                "name": "保存语音文件（落盘）",
+                "hint": "开启后音频保存到 data/files/mimo_tts（位置可查、日志打印完整路径），并按数量+时长自动清理；关闭时直接发送、不留文件"
+            }
+        }
+    },
+    "save_audio_max_files": {
+        "name": "Max Saved Files",
+        "type": "integer",
+        "default": 100,
+        "hint": "Maximum number of wav files kept under data/files/mimo_tts; the oldest are removed first.",
+        "locales": {
+            "zh": {
+                "name": "保留文件数上限",
+                "hint": "超过后从最旧的文件开始清理"
+            }
+        }
+    },
+    "save_audio_max_age_hours": {
+        "name": "Max Keep Hours",
+        "type": "integer",
+        "default": 48,
+        "hint": "Audio files older than this are removed.",
+        "locales": {
+            "zh": {
+                "name": "保留时长（小时）",
+                "hint": "超过该时长的音频文件会被清理"
+            }
+        }
+    },
+    "save_audio_cleanup_minutes": {
+        "name": "Cleanup Interval (minutes)",
+        "type": "integer",
+        "default": 180,
+        "hint": "Periodic cleanup interval in minutes. Default 180 = every 3 hours.",
+        "locales": {
+            "zh": {
+                "name": "清理间隔（分钟）",
+                "hint": "定时清理的检查周期，默认 180（3 小时）"
+            }
+        }
     }
 }

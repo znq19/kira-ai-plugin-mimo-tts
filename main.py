@@ -1,7 +1,10 @@
-import os
+import asyncio
 import base64
+import os
 import re
+import stat
 import time
+from typing import Optional
 
 import httpx
 
@@ -14,25 +17,170 @@ from core.utils.path_utils import get_data_path
 MIMO_TTS_ENDPOINT = "https://api.xiaomimimo.com/v1/chat/completions"
 MIMO_TTS_MODEL = "mimo-v2.5-tts-voicedesign"
 
+_AUDIO_FILE_PREFIX = "mimo_tts_"
+_AUDIO_FILE_PROTECT_SECONDS = 60
+
 
 class MiMoTTSPlugin(BasePlugin):
 
     def __init__(self, ctx, cfg: dict):
         super().__init__(ctx, cfg)
-        self.api_key: str = cfg.get("api_key", "") or ""
-        self.default_voice: str = cfg.get("default_voice", "一个年轻温柔的女性声音，语速适中，语调自然亲切")
-        self.auto_format_fix: bool = cfg.get("auto_format_fix", True)
-        self.temp_dir = os.path.join(str(get_data_path()), "temp", "mimo_tts")
-        os.makedirs(self.temp_dir, exist_ok=True)
+        self._cfg = cfg or {}
+        self.api_key: str = self._cfg.get("api_key", "") or ""
+        self.default_voice: str = self._cfg.get("default_voice", "一个年轻温柔的女性声音，语速适中，语调自然亲切")
+        self.auto_format_fix: bool = self._cfg.get("auto_format_fix", True)
+        # 可选留存的音频目录：data/files 不在框架临时清理器管辖内，由插件自己定量+定时清理
+        self.audio_dir = os.path.join(str(get_data_path()), "files", "mimo_tts")
+        self._cleanup_task: Optional[asyncio.Task] = None
 
     async def initialize(self):
         if self.api_key:
             logger.info("MiMo TTS 插件已加载（标签模式：<mimo_tts>）")
         else:
             logger.warning("MiMo TTS: API Key 未配置，请在插件设置中填写")
+        if self._cleanup_task is None or self._cleanup_task.done():
+            self._cleanup_task = asyncio.create_task(self._audio_cleanup_loop())
 
     async def terminate(self):
+        task = self._cleanup_task
+        self._cleanup_task = None
+        if task is not None:
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.debug(f"MiMo TTS: 清理任务结束于异常: {e}")
         logger.info("MiMo TTS 插件已卸载")
+
+    # ========== 落盘音频的定量 + 定时清理 ==========
+
+    def _cfg_bool(self, key: str, default: bool) -> bool:
+        value = self._cfg.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return default
+
+    def _cfg_int(self, key: str, default: int) -> int:
+        try:
+            return int(self._cfg.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    async def _audio_cleanup_loop(self):
+        """后台清理循环：启动先清一遍，之后按配置间隔定期清理（每轮读取最新配置）。"""
+        try:
+            await self._cleanup_audio_files()
+            while True:
+                interval_minutes = max(5, self._cfg_int("save_audio_cleanup_minutes", 180))
+                await asyncio.sleep(interval_minutes * 60)
+                try:
+                    await self._cleanup_audio_files()
+                except Exception:
+                    logger.exception("MiMo TTS: 音频清理失败，将在下个周期重试")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("MiMo TTS: 音频清理任务异常退出")
+
+    async def _cleanup_audio_files(self):
+        """按「保留数量 + 保留时长」清理 data/files/mimo_tts 下本插件产生的 wav。"""
+        folder = self.audio_dir
+        max_files = max(1, self._cfg_int("save_audio_max_files", 100))
+        max_age_seconds = max(1, self._cfg_int("save_audio_max_age_hours", 48)) * 3600
+        protect_seconds = _AUDIO_FILE_PROTECT_SECONDS
+
+        def sweep():
+            if not os.path.isdir(folder):
+                return None
+            now = time.time()
+            entries = []
+            for name in os.listdir(folder):
+                if not name.startswith(_AUDIO_FILE_PREFIX) or not name.endswith(".wav"):
+                    continue
+                path = os.path.join(folder, name)
+                try:
+                    entry_stat = os.stat(path)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(entry_stat.st_mode):
+                    continue
+                entries.append((path, entry_stat.st_mtime))
+            entries.sort(key=lambda item: item[1])  # 最旧在前
+
+            deleted = 0
+            remaining = []
+            for path, mtime in entries:
+                age = now - mtime
+                if age > max_age_seconds and age > protect_seconds:
+                    try:
+                        os.unlink(path)
+                        deleted += 1
+                        continue
+                    except OSError as e:
+                        logger.debug(f"MiMo TTS: 音频清理失败 {path}: {e}")
+                remaining.append((path, mtime))
+
+            overflow = len(remaining) - max_files
+            if overflow > 0:
+                kept = []
+                for path, mtime in remaining:  # 最旧在前，优先删除超量的旧文件
+                    if overflow > 0 and (now - mtime) > protect_seconds:
+                        try:
+                            os.unlink(path)
+                            deleted += 1
+                            overflow -= 1
+                            continue
+                        except OSError as e:
+                            logger.debug(f"MiMo TTS: 音频清理失败 {path}: {e}")
+                    kept.append((path, mtime))
+                remaining = kept
+            return deleted, len(remaining)
+
+        result = await asyncio.to_thread(sweep)
+        if result and result[0] > 0:
+            logger.info(f"MiMo TTS: 音频清理完成，删除 {result[0]} 个，保留 {result[1]} 个")
+
+    async def _audio_post_write_check(self):
+        """落盘后的轻量检查：数量超限时立即清理，避免扎堆等到下个周期。"""
+        folder = self.audio_dir
+        max_files = max(1, self._cfg_int("save_audio_max_files", 100))
+
+        def count():
+            try:
+                return sum(
+                    1 for name in os.listdir(folder)
+                    if name.startswith(_AUDIO_FILE_PREFIX) and name.endswith(".wav")
+                )
+            except OSError:
+                return 0
+
+        if await asyncio.to_thread(count) > max_files:
+            await self._cleanup_audio_files()
+
+    async def _save_audio_file(self, audio_bytes: bytes) -> Optional[str]:
+        """把合成音频写入 data/files/mimo_tts；失败返回 None（调用方回退为直传）。"""
+        folder = self.audio_dir
+        file_path = os.path.join(folder, f"{_AUDIO_FILE_PREFIX}{int(time.time() * 1000)}.wav")
+
+        def write():
+            os.makedirs(folder, exist_ok=True)
+            with open(file_path, "wb") as f:
+                f.write(audio_bytes)
+
+        try:
+            await asyncio.to_thread(write)
+        except Exception as e:
+            logger.error(f"MiMo TTS: 音频保存失败，改为直传: {e}")
+            return None
+        logger.info(f"MiMo TTS: 音频已保存 → {file_path}")
+        return file_path
 
     async def _synthesize(self, voice_description: str, text: str) -> bytes:
         """调用 MiMo TTS API 合成语音，返回 WAV 音频字节"""
@@ -75,6 +223,11 @@ class MiMoTTSPlugin(BasePlugin):
 
         与官方 <record> 标签同机制：LLM 决策、合成、发送在同一个 LLM 步骤内完成，
         不产生额外的工具调用步骤，也不会出现工具结果后 LLM 输出空 <msg/> 的问题。
+
+        默认（save_audio 关闭）：音频以 base64 直接交给框架（与框架自带 TTS
+        客户端一致），发送时按适配器需要由框架物化临时文件，插件自身不落盘。
+        开启 save_audio 后：音频保存到 data/files/mimo_tts 并以路径形式交给
+        框架（同旧版行为，位置可查、日志可见），文件由插件定量+定时清理。
         """
         text = self._clean_voice_text(value)
         if not text:
@@ -89,16 +242,22 @@ class MiMoTTSPlugin(BasePlugin):
         try:
             logger.info(f"MiMo TTS: 开始合成，音色='{voice_desc[:50]}...'，文本长度={len(text)}")
             audio_bytes = await self._synthesize(voice_desc, text)
-
-            filename = f"mimo_tts_{int(time.time())}.wav"
-            file_path = os.path.join(self.temp_dir, filename)
-            with open(file_path, "wb") as f:
-                f.write(audio_bytes)
-
             logger.info(f"MiMo TTS: 合成完成，文件大小={len(audio_bytes)} bytes")
-            return [Record(record=file_path, name=filename)]
+
+            if self._cfg_bool("save_audio", False):
+                saved_path = await self._save_audio_file(audio_bytes)
+                if saved_path:
+                    await self._audio_post_write_check()
+                    return [Record(record=saved_path, mime="audio/wav", name=os.path.basename(saved_path))]
+
+            filename = f"{_AUDIO_FILE_PREFIX}{int(time.time())}.wav"
+            return [Record(
+                record=base64.b64encode(audio_bytes).decode("ascii"),
+                mime="audio/wav",
+                name=filename,
+            )]
         except httpx.HTTPStatusError as e:
-            logger.error(f"MiMo TTS API 错误: {e.response.status_code} - {e.response.text}")
+            logger.error(f"MiMo TTS API 错误: {e.response.status_code} - {str(e.response.text)[:300]}")
         except Exception as e:
             logger.error(f"MiMo TTS 合成异常: {e}")
 
@@ -116,10 +275,10 @@ class MiMoTTSPlugin(BasePlugin):
         框架解析器只取标签的直接文本（child.text），标签内再嵌套子标签时
         内容会在解析阶段静默丢失（处理器收到空串，语音发不出去），
         所以必须在 llm_response 阶段先把 text_response 里的嵌套剥掉。
+
+        该兜底始终生效，不受 auto_format_fix 开关影响（该开关只控制发送前的拆分整理）。
         """
         if resp.tool_calls:
-            return
-        if not self.auto_format_fix:
             return
         text = resp.text_response or ""
         if "<mimo_tts" not in text:
@@ -201,7 +360,6 @@ class MiMoTTSPlugin(BasePlugin):
             return any(not isinstance(x, (At, Reply)) for x in elems)
 
         real_runs = [r for r in runs if not (len(r) == 1 and isinstance(r[0], Record)) and has_real_content(r)]
-        record_runs = [r for r in runs if len(r) == 1 and isinstance(r[0], Record)]
         stray = [e for r in runs
                  if not (len(r) == 1 and isinstance(r[0], Record)) and not has_real_content(r)
                  for e in r]
